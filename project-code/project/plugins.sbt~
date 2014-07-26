@@ -10,4 +10,4 @@ addSbtPlugin("org.scalastyle" %% "scalastyle-sbt-plugin" % "0.3.1")
 
 libraryDependencies <+= (sbtVersion) { sv => "org.scala-sbt" % "scripted-plugin" % sv }  
 
-// libraryDependencies <+= (sbtVersion) { sv => "org.scala-sbt" % "scripted-sbt" % sv } 
+libraryDependencies <+= (sbtVersion) { sv => "org.scala-sbt" % "scripted-sbt" % sv } 

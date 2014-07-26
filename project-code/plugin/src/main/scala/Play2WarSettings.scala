@@ -15,10 +15,12 @@
  */
 package com.github.play2war.plugin
 
+import com.github.play2war.plugin.Play2WarKeys._
+
 import sbt.{`package` => _, _}
 import sbt.Keys._
-import PlayKeys._
-import com.github.play2war.plugin.Play2WarKeys._
+import sbt.PlayKeys._
+import sbt.InputTask
 
 trait Play2WarSettings {
   this: Play2WarCommands =>
@@ -52,11 +54,14 @@ trait Play2WarSettings {
     
     explodedJar := false,
 
+    // Bind intermediateWar building to "intermediateWar" task
+    intermediateWar <<= intermedieteWarTask,
+    
     // Bind war building to "war" task
-    war <<= warTask,
+    war <<= InputTask(stringInput)(warTask)//,
 
     // Bind war task to "package" task (phase)
-    `package` <<= war //
+    //`package` <<= war //
   )
 
   // TODO: the line below was causing the following error in "sbt play-package-everything" (and "sbt war"):

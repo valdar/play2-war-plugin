@@ -19,11 +19,8 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileInputStream
 import java.util.jar.Manifest
-
 import scala.collection.immutable.Stream.consWrapper
-
 import com.github.play2war.plugin.Play2WarKeys._
-
 import sbt.ConfigKey.configurationToKey
 import sbt.Keys._
 import sbt.Runtime
@@ -33,6 +30,13 @@ import sbt.AttributeKey
 import sbt.IO
 import sbt.ModuleID
 import sbt.Path
+import sbt.complete.Parser
+import sbt.complete.DefaultParsers._
+import sbt.TaskKey
+import sbt.Project.Initialize
+import sbt.State
+import sbt.{`package` => _, _}
+import java.io.FilenameFilter
 
 trait Play2WarCommands extends sbt.PlayCommands with sbt.PlayReloader with sbt.PlayPositionMapper {
 
@@ -49,14 +53,39 @@ trait Play2WarCommands extends sbt.PlayCommands with sbt.PlayReloader with sbt.P
           case files => files.toStream.flatMap(getFiles(_, skipHidden))
         })
     }
+      
+  val stringInput: Initialize[State => Parser[Option[String]]] = (sbtVersion){ sbtVer =>
+		  (state: State) => 
+		  val extracted: Extracted = Project.extract(state)
+		  import extracted._
+		  val confDirectory: Option[sbt.File] = PlayKeys.confDirectory in currentRef get structure.data
 
-  val warTask = (playPackageEverything, dependencyClasspath in Runtime, target, normalizedName,
-      version, webappResource, streams, servletVersion, targetName, disableWarningWhenWebxmlFileFound, defaultFilteredArtifacts, filteredArtifacts, explodedJar) map {
-    (packaged, dependencies, target, id, version, webappResource, s, servletVersion, targetName, disableWarningWhenWebxmlFileFound, defaultFilteredArtifacts, filteredArtifacts, explodedJar) =>
+		  confDirectory match {	case Some(dir) => dir.listFiles().filter(_.ext == "conf").foldLeft(success(""))( (oldToken, file) => oldToken | (Space ~> token(file.getName())) ).?
+		  						case None => success("").?
+		  				} 
+      } 
 
+  val intermedieteWarTask = (	playPackageEverything, dependencyClasspath in Runtime, Keys.`package` in Compile, explodedJar, servletVersion,
+		  						webappResource, disableWarningWhenWebxmlFileFound, targetName, defaultFilteredArtifacts, filteredArtifacts) map {
+    (playPackageEverything, dependencyClasspath, packageTaskdependency, explodedJar, servletVersion, webappResource, disableWarningWhenWebxmlFileFound, targetName, defaultFilteredArtifacts, filteredArtifacts) => 
+    Play2WarData(playPackageEverything, dependencyClasspath, packageTaskdependency, explodedJar, servletVersion, webappResource, disableWarningWhenWebxmlFileFound, targetName, defaultFilteredArtifacts, filteredArtifacts)
+  }
+  
+  val warTask = (parsedTask: TaskKey[Option[String]]) => {
+    
+//        ( parsedTask, playPackageEverything, dependencyClasspath in Runtime, target, normalizedName,
+//      version, webappResource, streams, servletVersion, targetName, disableWarningWhenWebxmlFileFound, defaultFilteredArtifacts, filteredArtifacts, explodedJar, Keys.`package` in Compile) map {
+//    ( selectedConfFileName, packaged, dependencies, target, id, version, webappResource, s, servletVersion, targetName, disableWarningWhenWebxmlFileFound, defaultFilteredArtifacts, filteredArtifacts, explodedJar, pkg) =>
+    
+    ( parsedTask, intermediateWar, target, normalizedName, version, streams, PlayKeys.confDirectory) map {
+    ( selectedConfFileName, play2warData, target, id, version, s, playConfDir) =>
+
+      val configurationFileName = selectedConfFileName.getOrElse("application.conf") 
+     
       s.log.info("Build WAR package for servlet container: " + servletVersion)
-
-      if (dependencies.exists(_.data.name.contains("play2-war-core-common"))) {
+      s.log.info("Whit configuration file name: " + configurationFileName)
+      
+      if (play2warData.dependencyClasspath.exists(_.data.name.contains("play2-war-core-common"))) {
         s.log.debug("play2-war-core-common found in dependencies!")
       } else {
         s.log.error("play2-war-core-common not found in dependencies!")
@@ -64,7 +93,7 @@ trait Play2WarCommands extends sbt.PlayCommands with sbt.PlayReloader with sbt.P
       }
 
       val warDir = target
-      val packageName = targetName.getOrElse(id + "-" + version)
+      val packageName = play2warData.targetName.getOrElse(id + "-" + version)
       val war = warDir / (packageName + ".war")
       val manifestString = "Manifest-Version: 1.0\n"
 
@@ -72,14 +101,14 @@ trait Play2WarCommands extends sbt.PlayCommands with sbt.PlayReloader with sbt.P
 
       IO.createDirectory(warDir)
 
-      val allFilteredArtifacts = defaultFilteredArtifacts ++ filteredArtifacts
+      val allFilteredArtifacts = play2warData.defaultFilteredArtifacts ++ play2warData.filteredArtifacts
 
       allFilteredArtifacts.foreach {
         case (groupId, artifactId) =>
           s.log.debug("Ignoring dependency " + groupId + " -> " + artifactId)
       }
 
-      val files: Traversable[(File, String)] = dependencies.
+      val files: Traversable[(File, String)] = play2warData.dependencyClasspath.
         filter(_.data.ext == "jar").flatMap { dependency =>
           val filename = for {
             module <- dependency.metadata.get(AttributeKey[ModuleID]("module-id"))
@@ -94,15 +123,42 @@ trait Play2WarCommands extends sbt.PlayCommands with sbt.PlayReloader with sbt.P
             Some(dependency.data -> path)
           }.getOrElse(None)
       } ++ {
-        if (explodedJar) {
-           s.log.info("Main artifacts " + packaged.map(_.getName).mkString("'", " ", "'") + " will be packaged exploded")
+        /////////////////////////////////////////////////////////////////////
+        if(configurationFileName!="application.conf"){
+          val explodedJarTmpDir = target / "explodedTmp"
+          IO.delete(explodedJarTmpDir)
+          IO.createDirectory(explodedJarTmpDir)
+
+          play2warData.playPackageEverything.map { jar =>
+            val filesToRezip :Traversable[(java.io.File, String)] = 
+            IO.unzip(jar, explodedJarTmpDir).map { file =>
+            	val partialPath = IO.relativize(explodedJarTmpDir, file).getOrElse(file.getName)
+                val absolutePath = file.getPath
+
+                if(absolutePath.contains(playConfDir.getName())
+                    && absolutePath.contains("application.conf")){
+            		file -> (partialPath+".unusedPlay2War")
+            	}else if(absolutePath.contains(playConfDir.getName()) 
+            			  && absolutePath.contains(configurationFileName)){
+            		file -> ("application.conf")
+            	}else{
+            		file -> (partialPath)
+            	}
+            }
+            IO.zip(filesToRezip, jar)
+            jar
+          }
+        }
+        /////////////////////////////////////////////////////////////////////
+        if (play2warData.explodedJar) {
+           s.log.info("Main artifacts " + play2warData.playPackageEverything.map(_.getName).mkString("'", " ", "'") + " will be packaged exploded")
 
           val explodedJarDir = target / "exploded"
           
           IO.delete(explodedJarDir)
           IO.createDirectory(explodedJarDir)
 
-          packaged.flatMap { jar =>
+          play2warData.playPackageEverything.flatMap { jar =>
             IO.unzip(jar, explodedJarDir).map {
               file =>
                 val partialPath = IO.relativize(explodedJarDir, file).getOrElse(file.getName)
@@ -110,18 +166,18 @@ trait Play2WarCommands extends sbt.PlayCommands with sbt.PlayReloader with sbt.P
                 file -> ("WEB-INF/classes/" + partialPath)
             }
           }
-        } else packaged.map(jar => jar -> ("WEB-INF/lib/" + jar.getName))
+        } else play2warData.playPackageEverything.map(jar => jar -> ("WEB-INF/lib/" + jar.getName))
       }
       
       files.foreach { case (file, path) =>
         s.log.debug("Embedding file " + file + " -> " + path)
       }
 
-      val webxmlFolder = webappResource / "WEB-INF"
+      val webxmlFolder = play2warData.webappResource / "WEB-INF"
       val webxml = webxmlFolder / "web.xml"
 
       // Web.xml generation
-      servletVersion match {
+      play2warData.servletVersion match {
         case "2.5" => {
 
           if (webxml.exists) {
@@ -157,22 +213,22 @@ trait Play2WarCommands extends sbt.PlayCommands with sbt.PlayReloader with sbt.P
 
         }
 
-        case "3.0" => handleWebXmlFileOnServlet30(webxml, s, disableWarningWhenWebxmlFileFound)
+        case "3.0" => handleWebXmlFileOnServlet30(webxml, s, play2warData.disableWarningWhenWebxmlFileFound)
         
         case unknown => {
             s.log.warn("Unknown servlet container version: " + unknown + ". Force default 3.0 version")
-            handleWebXmlFileOnServlet30(webxml, s, disableWarningWhenWebxmlFileFound)
+            handleWebXmlFileOnServlet30(webxml, s, play2warData.disableWarningWhenWebxmlFileFound)
         }
       }
 
       // Webapp resources
-      s.log.debug("Webapp resources directory: " + webappResource.getAbsolutePath)
+      s.log.debug("Webapp resources directory: " + play2warData.webappResource.getAbsolutePath)
 
-      val filesToInclude = getFiles(webappResource).filter(f => f.isFile)
+      val filesToInclude = getFiles(play2warData.webappResource).filter(f => f.isFile)
 
       val additionnalResources = filesToInclude.map {
         f =>
-          f -> Path.relativizeFile(webappResource, f).get.getPath
+          f -> Path.relativizeFile(play2warData.webappResource, f).get.getPath
       }
 
       additionnalResources.foreach {
@@ -180,7 +236,7 @@ trait Play2WarCommands extends sbt.PlayCommands with sbt.PlayReloader with sbt.P
           s.log.debug("Embedding " + r._1 + " -> /" + r._2)
       }
 
-      val metaInfFolder = webappResource / "META-INF"
+      val metaInfFolder = play2warData.webappResource / "META-INF"
       val manifest = if (metaInfFolder.exists()) {
         val option = metaInfFolder.listFiles.find(f =>
           manifestRegex.r.pattern.matcher(f.getAbsolutePath()).matches())
@@ -205,6 +261,10 @@ trait Play2WarCommands extends sbt.PlayCommands with sbt.PlayReloader with sbt.P
       war
   }
 
+    
+  }
+    
+    
   def handleWebXmlFileOnServlet30(webxml: File, s: TaskStreams, disableWarn: Boolean) = {
     if (webxml.exists && !disableWarn) {
       s.log.warn("WEB-INF/web.xml found! As WAR package will be built for servlet 3.0 containers, check if this web.xml file is compatible with.")

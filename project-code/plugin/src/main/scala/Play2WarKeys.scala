@@ -18,8 +18,10 @@ package com.github.play2war.plugin
 import sbt._
 
 trait Play2WarKeys {
-
-  lazy val war = TaskKey[File]("war", "Build the standalone application package as a WAR file")
+  
+  lazy val intermediateWar = TaskKey[Play2WarData]("intermediateWar", "Gather the play2war data")
+  
+  lazy val war = InputKey[File]("war", "Build the standalone application package as a WAR file")
 
   lazy val servletVersion: SettingKey[String] =
     SettingKey[String](
